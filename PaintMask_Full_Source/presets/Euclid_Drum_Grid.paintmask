@@ -1,0 +1,20 @@
+{
+  "name": "Euclid Drum Grid",
+  "category": "Factory",
+  "scanMode": "leftToRight",
+  "euclidean": {
+    "kicks": [
+      4,
+      16
+    ],
+    "hats": [
+      7,
+      16
+    ],
+    "claps": [
+      3,
+      16
+    ]
+  },
+  "notes": "Euclidean lane scaffold"
+}

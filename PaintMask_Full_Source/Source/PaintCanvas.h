@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include "ScanVisualizer.h"
 
 struct PaintPoint
 {
@@ -38,6 +39,7 @@ class PaintDocument
 public:
     void clear();
     void addStroke(const PaintStroke& stroke);
+    bool undoLast();
     const juce::Array<PaintStroke>& getStrokes() const noexcept { return strokes; }
     juce::Array<PaintStroke>& getMutableStrokes() noexcept { return strokes; }
 
@@ -68,6 +70,8 @@ public:
     void setCurrentColour(juce::Colour newColour);
     void setCurrentThickness(float newThickness);
     void setListener(Listener* l) { listener = l; }
+    void setOverlayMode(ScanVisualizer::Mode newMode) noexcept;
+    void setOverlayBeatPosition(double newBeatPosition) noexcept;
 
 private:
     PaintDocument& document;
@@ -76,8 +80,11 @@ private:
     PaintStroke::Tool currentTool = PaintStroke::Tool::brush;
     juce::Colour currentColour = juce::Colours::red;
     float currentThickness = 0.02f;
+    ScanVisualizer overlay;
 
     PaintPoint makePoint(const juce::MouseEvent& e) const;
+    PaintStroke finaliseStrokeGeometry(const PaintStroke& seedStroke) const;
     void drawStroke(juce::Graphics& g, const PaintStroke& s, bool active) const;
+    juce::Path buildStrokePath(const PaintStroke& s, juce::Rectangle<float> area) const;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PaintCanvasComponent)
 };

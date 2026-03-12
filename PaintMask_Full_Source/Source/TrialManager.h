@@ -4,12 +4,23 @@
 class TrialManager
 {
 public:
+    enum class Mode
+    {
+        trial,
+        studio,
+        grace,
+        lite
+    };
+
     TrialManager();
 
-    bool isStudioUnlocked() const;
+    bool isStudioActive() const;
     bool isTrialActive() const;
+    bool isGraceActive() const;
+    bool isLiteActive() const;
     int getDaysRemaining() const;
-    void unlockStudio(const juce::String& key);
+    juce::String getModeName() const;
+    void activateStudioLocally(const juce::String& key);
 
 private:
     juce::File stateFile;
@@ -17,4 +28,5 @@ private:
 
     void load();
     void save() const;
+    Mode getMode() const;
 };

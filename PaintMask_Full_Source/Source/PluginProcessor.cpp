@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "ScanVisualizer.h"
 
 PaintMaskAudioProcessor::PaintMaskAudioProcessor()
     : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)),
@@ -8,6 +9,7 @@ PaintMaskAudioProcessor::PaintMaskAudioProcessor()
     for (const auto& param : apvts.processor.getParameters())
         apvts.addParameterListener(param->getParameterID(), this);
 
+    seedDefaultLayersIfNeeded();
     rebuildGeneratedEvents();
 }
 
@@ -23,17 +25,23 @@ juce::AudioProcessorValueTreeState::ParameterLayout PaintMaskAudioProcessor::cre
     params.push_back(std::make_unique<juce::AudioParameterChoice>("scanMode", "Scan Mode", juce::StringArray{ "L->R", "PingPong", "Circular", "Spiral", "Wave" }, 0));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("loopBeats", "Loop Beats", juce::NormalisableRange<float>(1.0f, 16.0f, 1.0f), 4.0f));
     params.push_back(std::make_unique<juce::AudioParameterInt>("rootNote", "Root Note", 24, 84, 48));
-    params.push_back(std::make_unique<juce::AudioParameterFloat>("swing", "Swing", 0.0f, 1.0f, 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("swing", "Swing", 0.0f, 0.5f, 0.0f));
     params.push_back(std::make_unique<juce::AudioParameterFloat>("density", "Density", 0.0f, 1.0f, 1.0f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>("previewGain", "Preview Gain", 0.0f, 1.0f, 0.18f));
     return { params.begin(), params.end() };
 }
 
-void PaintMaskAudioProcessor::prepareToPlay(double sampleRate, int)
+void PaintMaskAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
+    previewSynth.prepare(sampleRate, samplesPerBlock);
+    clearPlaybackState();
 }
 
-void PaintMaskAudioProcessor::releaseResources() {}
+void PaintMaskAudioProcessor::releaseResources()
+{
+    clearPlaybackState();
+}
 
 bool PaintMaskAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
@@ -48,42 +56,164 @@ void PaintMaskAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juc
     const auto playHead = getPlayHead();
     juce::AudioPlayHead::CurrentPositionInfo info;
     double bpm = 120.0;
+    bool isPlaying = false;
+
     if (playHead != nullptr && playHead->getCurrentPosition(info))
     {
         if (info.bpm > 0.0)
             bpm = info.bpm;
+
         currentPpq = info.ppqPosition;
+        isPlaying = info.isPlaying;
     }
 
-    pushEventsForBlock(midi, buffer.getNumSamples(), bpm);
+    previewSynth.setGain(*apvts.getRawParameterValue("previewGain"));
+
+    if (! isPlaying)
+    {
+        clearPlaybackState();
+        return;
+    }
+
+    if (currentPpq + 0.0001 < lastPpq)
+        clearPlaybackState();
+
+    pushEventsForBlock(buffer, midi, buffer.getNumSamples(), bpm, isPlaying);
+    routeMidiToPreviewSynth(midi, buffer);
+    lastPpq = currentPpq;
 }
 
-void PaintMaskAudioProcessor::pushEventsForBlock(juce::MidiBuffer& midi, int numSamples, double)
+void PaintMaskAudioProcessor::flushPendingNoteOffs(juce::MidiBuffer& midi,
+                                                   int numSamples,
+                                                   double blockStartPpq,
+                                                   double blockEndPpq,
+                                                   double samplesPerBeat)
 {
+    for (int i = pendingNoteOffs.size(); --i >= 0;)
+    {
+        const auto& pending = pendingNoteOffs.getReference(i);
+        if (pending.ppqPosition < blockStartPpq)
+        {
+            midi.addEvent(juce::MidiMessage::noteOff(pending.channel, pending.note), 0);
+            pendingNoteOffs.remove(i);
+            continue;
+        }
+
+        if (pending.ppqPosition >= blockStartPpq && pending.ppqPosition < blockEndPpq)
+        {
+            const auto relBeats = pending.ppqPosition - blockStartPpq;
+            const int samplePos = juce::jlimit(0, numSamples - 1, int(std::round(relBeats * samplesPerBeat)));
+            midi.addEvent(juce::MidiMessage::noteOff(pending.channel, pending.note), samplePos);
+            pendingNoteOffs.remove(i);
+        }
+    }
+}
+
+void PaintMaskAudioProcessor::pushEventsForBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi, int numSamples, double bpm, bool)
+{
+    juce::ignoreUnused(buffer);
     if (generatedEvents.isEmpty())
         return;
 
-    const auto loopBeats = *apvts.getRawParameterValue("loopBeats");
-    const auto density = *apvts.getRawParameterValue("density");
-    const double blockStartBeat = std::fmod(currentPpq, loopBeats);
-    const double blockEndBeat = blockStartBeat + 0.25; // simple preview assumption
+    const auto loopBeats = juce::jmax(1.0, (double) *apvts.getRawParameterValue("loopBeats"));
+    const auto density = juce::jlimit(0.0f, 1.0f, *apvts.getRawParameterValue("density"));
+    const auto swing = juce::jlimit(0.0f, 0.5f, *apvts.getRawParameterValue("swing"));
+    const auto densityBoost = performanceMode.isEnabled() ? performanceMode.getSceneA().densityBoost : 0.0f;
+    const auto finalDensity = juce::jlimit(0.0f, 1.0f, density + densityBoost);
 
-    for (const auto& event : generatedEvents)
+    const double samplesPerBeat = currentSampleRate * (60.0 / juce::jmax(1.0, bpm));
+    const double blockStartPpq = currentPpq;
+    const double blockLengthBeats = numSamples / juce::jmax(1.0, samplesPerBeat);
+    const double blockEndPpq = blockStartPpq + blockLengthBeats;
+
+    flushPendingNoteOffs(midi, numSamples, blockStartPpq, blockEndPpq, samplesPerBeat);
+
+    auto emitEventWindow = [&](double localLoopStart, double absoluteLoopOffset)
     {
-        if (event.isMask)
-            continue;
-        if (juce::Random::getSystemRandom().nextFloat() > density)
-            continue;
+        const double localLoopEnd = localLoopStart + blockLengthBeats;
 
-        const double wrappedBeat = event.beatPosition;
-        if (wrappedBeat >= blockStartBeat && wrappedBeat < blockEndBeat)
+        for (int index = 0; index < generatedEvents.size(); ++index)
         {
-            const auto rel = (wrappedBeat - blockStartBeat) / juce::jmax(0.001, blockEndBeat - blockStartBeat);
-            const int samplePos = juce::jlimit(0, numSamples - 1, int(rel * numSamples));
-            midi.addEvent(juce::MidiMessage::noteOn(1, event.note, (juce::uint8) event.velocity), samplePos);
-            midi.addEvent(juce::MidiMessage::noteOff(1, event.note), juce::jmin(numSamples - 1, samplePos + 120));
+            const auto& event = generatedEvents.getReference(index);
+            if (event.isMask)
+                continue;
+
+            juce::Random rng((event.note * 131) + int(event.beatPosition * 1000.0) + int(loopBeats * 97.0));
+            if (rng.nextFloat() > finalDensity)
+                continue;
+
+            double eventBeat = event.beatPosition;
+
+            if (swing > 0.0f)
+            {
+                const auto eighths = std::floor(eventBeat * 2.0);
+                const bool isOffbeat = (int(eighths) % 2) == 1;
+                if (isOffbeat)
+                    eventBeat += 0.5 * swing;
+            }
+
+            if (eventBeat < localLoopStart || eventBeat >= localLoopEnd)
+                continue;
+
+            const double absoluteEventPpq = absoluteLoopOffset + eventBeat;
+            const double relBeats = absoluteEventPpq - blockStartPpq;
+            const int samplePos = juce::jlimit(0, numSamples - 1, int(std::round(relBeats * samplesPerBeat)));
+            const auto velocity = (juce::uint8) juce::jlimit(1, 127, event.velocity);
+
+            midi.addEvent(juce::MidiMessage::noteOn(1, event.note, velocity), samplePos);
+
+            const double noteOffPpq = absoluteEventPpq + juce::jmax(0.03125, event.durationBeats);
+            if (noteOffPpq < blockEndPpq)
+            {
+                const int offSamplePos = juce::jlimit(0, numSamples - 1, int(std::round((noteOffPpq - blockStartPpq) * samplesPerBeat)));
+                midi.addEvent(juce::MidiMessage::noteOff(1, event.note), juce::jmax(samplePos, offSamplePos));
+            }
+            else
+            {
+                pendingNoteOffs.add({ 1, event.note, noteOffPpq });
+            }
         }
+    };
+
+    const double blockStartWithinLoop = std::fmod(blockStartPpq, loopBeats);
+    const double blockStartBasePpq = blockStartPpq - blockStartWithinLoop;
+
+    emitEventWindow(blockStartWithinLoop, blockStartBasePpq);
+
+    if (blockStartWithinLoop + blockLengthBeats > loopBeats)
+        emitEventWindow(0.0, blockStartBasePpq + loopBeats);
+}
+
+void PaintMaskAudioProcessor::routeMidiToPreviewSynth(const juce::MidiBuffer& midi, juce::AudioBuffer<float>& buffer)
+{
+    for (const auto metadata : midi)
+    {
+        const auto msg = metadata.getMessage();
+        if (msg.isNoteOn())
+            previewSynth.noteOn(msg.getNoteNumber(), msg.getFloatVelocity());
+        else if (msg.isNoteOff())
+            previewSynth.noteOff(msg.getNoteNumber());
     }
+
+    previewSynth.render(buffer, 0, buffer.getNumSamples());
+}
+
+void PaintMaskAudioProcessor::clearPlaybackState()
+{
+    pendingNoteOffs.clearQuick();
+    previewSynth.reset();
+    lastPpq = 0.0;
+}
+
+void PaintMaskAudioProcessor::seedDefaultLayersIfNeeded()
+{
+    if (layerManager.getNumLayers() > 0)
+        return;
+
+    layerManager.addLayer("Bass");
+    layerManager.addLayer("Harmony");
+    layerManager.addLayer("Lead");
+    layerManager.addLayer("FX");
 }
 
 juce::AudioProcessorEditor* PaintMaskAudioProcessor::createEditor()
@@ -93,50 +223,64 @@ juce::AudioProcessorEditor* PaintMaskAudioProcessor::createEditor()
 
 void PaintMaskAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
-    auto state = apvts.copyState();
-    state.setProperty("paintDocument", serializer.toJson(document), nullptr);
-
-    std::unique_ptr<juce::XmlElement> xml(state.createXml());
-    copyXmlToBinary(*xml, destData);
+    serializer.writeState(destData, document, apvts.copyState(), trialManager);
 }
 
 void PaintMaskAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
-    std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, sizeInBytes));
-    if (xml == nullptr)
-        return;
-
-    const auto state = juce::ValueTree::fromXml(*xml);
-    if (! state.isValid())
-        return;
-
-    apvts.replaceState(state);
-    const auto json = state.getProperty("paintDocument").toString();
-    if (json.isNotEmpty())
-        serializer.fromJson(json, document);
-
+    serializer.readState(data, sizeInBytes, document, apvts, trialManager);
     rebuildGeneratedEvents();
 }
 
 void PaintMaskAudioProcessor::rebuildGeneratedEvents()
 {
-    const auto modeChoice = int(*apvts.getRawParameterValue("scanMode"));
-    switch (modeChoice)
-    {
-        case 1: scanEngine.setMode(ScanEngine::Mode::pingPong); break;
-        case 2: scanEngine.setMode(ScanEngine::Mode::circular); break;
-        case 3: scanEngine.setMode(ScanEngine::Mode::spiral); break;
-        case 4: scanEngine.setMode(ScanEngine::Mode::wave); break;
-        default: scanEngine.setMode(ScanEngine::Mode::leftToRight); break;
-    }
-
+    const auto mode = static_cast<ScanEngine::Mode>((int) *apvts.getRawParameterValue("scanMode"));
+    scanEngine.setMode(mode);
     generatedEvents = scanEngine.buildEvents(document,
                                              *apvts.getRawParameterValue("loopBeats"),
-                                             int(*apvts.getRawParameterValue("rootNote")),
+                                             (int) *apvts.getRawParameterValue("rootNote"),
                                              colourMapper);
 }
 
-void PaintMaskAudioProcessor::parameterChanged(const juce::String&, float)
+void PaintMaskAudioProcessor::parameterChanged(const juce::String& parameterID, float)
 {
+    if (parameterID == "scanMode" || parameterID == "loopBeats" || parameterID == "rootNote")
+        rebuildGeneratedEvents();
+}
+
+void PaintMaskAudioProcessor::applyMirrorX()
+{
+    document = mutationEngine.mirrorX(document);
     rebuildGeneratedEvents();
+}
+
+void PaintMaskAudioProcessor::applyMirrorY()
+{
+    document = mutationEngine.mirrorY(document);
+    rebuildGeneratedEvents();
+}
+
+void PaintMaskAudioProcessor::applyRotateQuarterTurn()
+{
+    document = mutationEngine.rotateQuarterTurn(document);
+    rebuildGeneratedEvents();
+}
+
+void PaintMaskAudioProcessor::applyDensityShift(float amount01)
+{
+    document = mutationEngine.densityShift(document, amount01);
+    rebuildGeneratedEvents();
+}
+
+ScanVisualizer::Mode PaintMaskAudioProcessor::getOverlayMode() const noexcept
+{
+    switch (scanEngine.getMode())
+    {
+        case ScanEngine::Mode::leftToRight: return ScanVisualizer::Mode::line;
+        case ScanEngine::Mode::pingPong:    return ScanVisualizer::Mode::pulse;
+        case ScanEngine::Mode::circular:    return ScanVisualizer::Mode::radial;
+        case ScanEngine::Mode::spiral:      return ScanVisualizer::Mode::spiral;
+        case ScanEngine::Mode::wave:        return ScanVisualizer::Mode::pulse;
+    }
+    return ScanVisualizer::Mode::line;
 }

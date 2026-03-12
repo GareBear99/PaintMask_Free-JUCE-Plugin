@@ -1,0 +1,11 @@
+{
+  "name": "Glass Pad Performance",
+  "category": "Factory",
+  "scanMode": "wave",
+  "performance": {
+    "sceneA": "intro",
+    "sceneB": "lift",
+    "sceneC": "drop"
+  },
+  "notes": "Performance-mode preset scaffold"
+}

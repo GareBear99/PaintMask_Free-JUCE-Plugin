@@ -1,40 +1,23 @@
-# Module Map
+# Module Map — PaintMask DARPA v0.6
 
-## Core plugin
-- PluginProcessor
-- PluginEditor
-
-## Canvas and interaction
+## Existing core
 - PaintCanvas
-- BrushTool
-- SplashTool
-- GeometryTool
-- MaskTool
-- MotionTool
-- InteractionRouter
-
-## Musical interpretation
 - ScanEngine
-- EventExtractor
 - ColorMapper
-- SeedEngine
-- Quantizer
-- ScaleMapper
-
-## Output
-- MidiEmitter
-- PreviewSynth
-- ModLaneEmitter
-
-## State and licensing
 - StateSerializer
-- PresetManager
 - TrialManager
-- StudioGate
+- PluginProcessor / PluginEditor
 
-## Visual systems
-- CanvasRenderer
-- ParticleLayer
-- GlowLayer
-- PlayheadRenderer
-- ThemeManager
+## Added premium-path modules
+- PreviewSynth
+- LayerManager
+- PatternMutationEngine
+- EuclideanRhythm
+- AudioToPaintAnalyzer
+- GestureBrushEngine
+- PerformanceMode
+- PresetLibrary
+- ScanVisualizer
+
+Core modules existed before.
+Premium-path modules are now included as source scaffolds for the next engineering pass.

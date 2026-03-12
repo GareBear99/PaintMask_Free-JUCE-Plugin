@@ -1,0 +1,7 @@
+{
+  "name": "PaintMask Factory Pack Template",
+  "version": "0.1.0",
+  "type": "preset_pack",
+  "author": "OpenAI handoff scaffold",
+  "description": "Template for future PaintMask preset/community packs."
+}

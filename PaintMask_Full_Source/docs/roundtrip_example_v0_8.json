@@ -1,0 +1,15 @@
+{
+  "name": "RoundTrip_Canonical_Example",
+  "loopLengthBeats": 4.0,
+  "minMidiNote": 36,
+  "maxMidiNote": 84,
+  "seed": 1337,
+  "mode": "phrase",
+  "mapping": {
+    "noteStartBeat": "xPosition",
+    "notePitch": "yPosition",
+    "noteDuration": "strokeLength",
+    "noteVelocity": "opacityThickness",
+    "noteChannel": "layerColor"
+  }
+}
